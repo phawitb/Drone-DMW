@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Live Drone & Object Tracker</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    #container {
+      display: flex;
+      height: 90vh;
+    }
+    #map {
+      flex: 3;
+    }
+    #details {
+      flex: 1;
+      padding: 10px;
+      border-left: 2px solid #ddd;
+      background: #f9f9f9;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    #detailsContent {
+      flex-grow: 1;
+    }
+    #details h3 {
+      margin-top: 0;
+    }
+    .value {
+      margin-bottom: 6px;
+    }
+    #objectImage {
+      width: 100%;
+      margin-top: 10px;
+      display: none;
+      border: 1px solid #ccc;
+    }
+    #flightContainer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+      margin-top: 20px;
+    }
+    #flightStatus {
+      width: 100%;
+      max-width: 300px;
+      text-align: center;
+      margin: 10px 0;
+      font-weight: bold;
+      font-size: 18px;
+    }
+    #startFlightBtn {
+      width: 100%;
+      padding: 10px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    #historyBtn {
+      display: none;
+      margin-top: 10px;
+      font-size: 16px;
+      text-align: center;
+      text-decoration: none;
+      color: #333;
+      font-weight: bold;
+    }
+    .placeholder {
+      color: gray;
+      font-style: italic;
+    }
+    .normal {
+      color: black;
+      font-style: normal;
+    }
+  </style>
+</head>
+<body>
+  <h2 style="text-align:center;">📡 Live Drone & Object Tracker</h2>
+
+  <div id="container">
+    <div id="map"></div>
+    <div id="details">
+      <div id="detailsContent">
+        <h3>🚁 Drone Info</h3>
+        <div id="droneBox" class="placeholder">Waiting for drone data...</div>
+        <hr>
+        <h3>🧍 Object Info</h3>
+        <div id="infoBox" class="placeholder">Click on an object to see details.</div>
+        <img id="objectImage" src="" />
+      </div>
+      <div id="flightContainer">
+        <button id="startFlightBtn" onclick="toggleFlight()">🚀 Start Flight</button>
+        <span id="flightStatus" style="color: red;">Status: Not Ready</span>
+        <a id="historyBtn" href="/history">📂 View History</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    });
+    const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '© Esri & NASA', maxZoom: 19
+    });
+
+    const map = L.map('map', {
+      center: [13.7367, 100.5231],
+      zoom: 16,
+      layers: [streetLayer]
+    });
+
+    L.control.layers({
+      "🗺️ Street": streetLayer,
+      "🛰️ Satellite": satelliteLayer
+    }).addTo(map);
+
+    let droneMarker = null;
+    let dronePath = [];
+    let droneSegments = [];
+    let dronePoints = [];
+    let objectMarkers = [];
+    let selectedObjectKey = null;
+    let flightActive = false;
+    let firstDroneGPSReceived = false;
+
+    async function toggleFlight() {
+      if (!flightActive) {
+        const res = await fetch('/api/start_flight', { method: 'POST' });
+        const data = await res.json();
+        if (data.ready) {
+          flightActive = true;
+          firstDroneGPSReceived = false;
+          document.getElementById('flightStatus').innerText = 'Status: Ready ✅';
+          document.getElementById('flightStatus').style.color = 'green';
+          document.getElementById('startFlightBtn').innerText = '🛬 Finish Flight';
+          document.getElementById('historyBtn').style.display = 'none';
+        }
+      } else {
+        await fetch('/api/clear');
+        dronePath = [];
+        selectedObjectKey = null;
+        firstDroneGPSReceived = false;
+
+        if (droneMarker) map.removeLayer(droneMarker);
+        droneMarker = null;
+
+        droneSegments.forEach(s => map.removeLayer(s));
+        droneSegments = [];
+
+        dronePoints.forEach(p => map.removeLayer(p));
+        dronePoints = [];
+
+        objectMarkers.forEach(m => map.removeLayer(m));
+        objectMarkers = [];
+
+        document.getElementById('droneBox').innerHTML = "Waiting for drone data...";
+        document.getElementById('infoBox').innerHTML = "Click on an object to see details.";
+        document.getElementById('objectImage').style.display = "none";
+        document.getElementById('flightStatus').innerText = 'Status: Not Ready';
+        document.getElementById('flightStatus').style.color = 'red';
+        document.getElementById('startFlightBtn').innerText = '🚀 Start Flight';
+        document.getElementById('historyBtn').style.display = 'block';
+        flightActive = false;
+        alert("✅ Flight finished and data cleared.");
+      }
+    }
+
+    async function fetchLatestDrone() {
+      const res = await fetch('/api/latest');
+      const data = await res.json();
+      if (!data.ready) return;
+
+      const latlng = [data.lat, data.lon];
+      if (!firstDroneGPSReceived) {
+        map.setView(latlng, 17);
+        firstDroneGPSReceived = true;
+      }
+
+      dronePath.push(latlng);
+      showDroneDetails(data);
+
+      if (dronePath.length > 1) {
+        const lastIdx = dronePath.length - 1;
+        const color = getRainbowColor(lastIdx / 100);
+        const segment = L.polyline([dronePath[lastIdx - 1], dronePath[lastIdx]], {
+          color: color, weight: 4
+        }).addTo(map);
+        droneSegments.push(segment);
+      }
+
+      const dot = L.circleMarker(latlng, {
+        radius: 4, color: 'red', fillColor: 'red', fillOpacity: 1
+      }).addTo(map);
+
+      dot.on('click', () => {
+        document.getElementById('infoBox').innerHTML = `
+          <div class="value"><b>🛰️ Drone Point</b></div>
+          <div class="value"><b>Lat:</b> ${data.lat.toFixed(6)}</div>
+          <div class="value"><b>Lon:</b> ${data.lon.toFixed(6)}</div>
+          <div class="value"><b>Altitude:</b> ${data.altitude.toFixed(2)} m</div>
+          <div class="value"><b>Time:</b> ${data.timestamp}</div>
+        `;
+        document.getElementById('objectImage').style.display = "none";
+        document.getElementById('objectImage').src = "";
+      });
+
+      dronePoints.push(dot);
+      if (droneMarker) {
+        droneMarker.setLatLng(latlng);
+      } else {
+        droneMarker = L.marker(latlng, { icon: getIcon("Drone") }).addTo(map);
+      }
+    }
+
+    async function fetchObjects() {
+      const res = await fetch('/api/objects');
+      const data = await res.json();
+
+      objectMarkers.forEach(m => map.removeLayer(m));
+      objectMarkers = [];
+
+      data.forEach(obj => {
+        const key = `${obj.lat.toFixed(6)},${obj.lon.toFixed(6)}`;
+        const isSelected = (key === selectedObjectKey);
+        const icon = isSelected ? getLargerIcon(obj.class) : getIcon(obj.class);
+        const marker = L.marker([obj.lat, obj.lon], { icon }).addTo(map);
+
+        marker.on('click', () => {
+          selectedObjectKey = key;
+          showObjectDetails(obj);
+        });
+
+        objectMarkers.push(marker);
+      });
+    }
+
+    function showDroneDetails(data) {
+      const box = document.getElementById('droneBox');
+      box.className = "normal";
+      box.innerHTML = `
+        <div class="value"><b>Lat:</b> ${data.lat.toFixed(6)}</div>
+        <div class="value"><b>Lon:</b> ${data.lon.toFixed(6)}</div>
+        <div class="value"><b>Altitude:</b> ${data.altitude.toFixed(2)} m</div>
+        <div class="value"><b>Time:</b> ${data.timestamp}</div>
+      `;
+    }
+
+    function showObjectDetails(obj) {
+      const box = document.getElementById('infoBox');
+      box.className = "normal";
+      box.innerHTML = `
+        <div class="value"><b>Class:</b> ${obj.class}</div>
+        <div class="value"><b>Lat:</b> ${obj.lat.toFixed(6)}</div>
+        <div class="value"><b>Lon:</b> ${obj.lon.toFixed(6)}</div>
+        <div class="value"><b>Time:</b> ${obj.timestamp}</div>
+      `;
+
+      const img = document.getElementById('objectImage');
+      if (obj.image_base64 && obj.image_base64.startsWith('data:image')) {
+        img.src = obj.image_base64;
+        img.style.display = 'block';
+      } else {
+        img.style.display = 'none';
+        img.src = '';
+      }
+    }
+
+    function getIcon(className) {
+      return new L.Icon({
+        iconUrl: `/static/icons/${className}.png`,
+        iconSize: [35, 35],
+        iconAnchor: [17, 17],
+        popupAnchor: [0, -10]
+      });
+    }
+
+    function getLargerIcon(className) {
+      return new L.Icon({
+        iconUrl: `/static/icons/${className}.png`,
+        iconSize: [50, 50],
+        iconAnchor: [25, 25],
+        popupAnchor: [0, -10]
+      });
+    }
+
+    function getRainbowColor(t) {
+      const r = Math.floor(255 * Math.sin(Math.PI * t));
+      const g = Math.floor(255 * Math.sin(Math.PI * (t + 0.33)));
+      const b = Math.floor(255 * Math.sin(Math.PI * (t + 0.66)));
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    function updateAll() {
+      fetchLatestDrone();
+      fetchObjects();
+      setTimeout(updateAll, 1000);
+    }
+
+    async function checkFlightStatus() {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      flightActive = data.ready;
+
+      if (flightActive) {
+        document.getElementById('flightStatus').innerText = 'Status: Ready ✅';
+        document.getElementById('flightStatus').style.color = 'green';
+        document.getElementById('startFlightBtn').innerText = '🛬 Finish Flight';
+        document.getElementById('historyBtn').style.display = 'none';
+      } else {
+        document.getElementById('flightStatus').innerText = 'Status: Not Ready';
+        document.getElementById('flightStatus').style.color = 'red';
+        document.getElementById('startFlightBtn').innerText = '🚀 Start Flight';
+        document.getElementById('historyBtn').style.display = 'block';
+      }
+    }
+
+    window.onload = async () => {
+      await checkFlightStatus();
+      updateAll();
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Flight History Viewer</title>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+    #topBar {
+      display: flex;
+      align-items: center;
+      padding: 10px;
+      background: #f0f0f0;
+    }
+    #backButton {
+      margin-right: 10px;
+      cursor: pointer;
+    }
+    #container {
+      display: flex;
+      height: calc(100vh - 50px);
+    }
+    #map {
+      flex: 3;
+      height: 100%;
+    }
+    #sidebar {
+      flex: 1;
+      padding: 15px;
+      border-left: 2px solid #ccc;
+      background-color: #fafafa;
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    #infoBox {
+      margin-bottom: 10px;
+    }
+    #objectImage {
+      width: 100%;
+      max-width: 100%;
+      display: none;
+      border: 1px solid #aaa;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="topBar">
+    <a href="/" id="backButton"><img src="/static/icons/Back.png" alt="Back" width="24" height="24"></a>
+    {% if flights %}
+      <label for="flightSelect">🛫 Select Flight:</label>
+      <select id="flightSelect" onchange="updateFlight()">
+        {% for flight in flights %}
+          <option value="{{ loop.index0 }}">{{ flight.flight }}</option>
+        {% endfor %}
+      </select>
+    {% else %}
+      <span style="margin-left: 10px; color: red;">🚫 No flight data available</span>
+    {% endif %}
+  </div>
+
+  <div id="container">
+    <div id="map"></div>
+    <div id="sidebar">
+      <h3>🧍 Object Info</h3>
+      <div id="infoBox">Click an object or drone point to view details.</div>
+      <img id="objectImage" src="" />
+    </div>
+  </div>
+
+  {% if flights %}
+  <script>
+    const flights = {{ flights | tojson }};
+    const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    });
+    const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '© Esri & NASA', maxZoom: 19
+    });
+  
+    const map = L.map('map', {
+      center: [13.7367, 100.5231],
+      zoom: 13,
+      layers: [streetLayer]
+    });
+  
+    L.control.layers({
+      "🗺️ Street": streetLayer,
+      "🛰️ Satellite": satelliteLayer
+    }).addTo(map);
+  
+    let droneSegments = [];
+    let startMarker = null;
+    let endMarker = null;
+    let objectMarkers = [];
+    let dronePointMarkers = [];
+  
+    let selectedMarker = null;
+    let selectedMarkerType = null;
+  
+    function getIcon(className) {
+      return new L.Icon({
+        iconUrl: `/static/icons/${className}.png`,
+        iconSize: [35, 35],
+        iconAnchor: [17, 17],
+        popupAnchor: [0, -10]
+      });
+    }
+  
+    function getLargerIcon(className) {
+      return new L.Icon({
+        iconUrl: `/static/icons/${className}.png`,
+        iconSize: [50, 50],
+        iconAnchor: [25, 25],
+        popupAnchor: [0, -10]
+      });
+    }
+  
+    function getRainbowColor(t) {
+      const r = Math.floor(255 * Math.sin(Math.PI * t));
+      const g = Math.floor(255 * Math.sin(Math.PI * (t + 0.33)));
+      const b = Math.floor(255 * Math.sin(Math.PI * (t + 0.66)));
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+  
+    function updateFlight() {
+      const idx = document.getElementById('flightSelect').value;
+      const flight = flights[idx];
+  
+      // Clear previous layers
+      droneSegments.forEach(seg => map.removeLayer(seg));
+      droneSegments = [];
+      if (startMarker) map.removeLayer(startMarker);
+      if (endMarker) map.removeLayer(endMarker);
+      objectMarkers.forEach(m => map.removeLayer(m));
+      objectMarkers = [];
+      dronePointMarkers.forEach(m => map.removeLayer(m));
+      dronePointMarkers = [];
+  
+      selectedMarker = null;
+  
+      // Draw drone path
+      const latlngs = flight.path.map(p => [p.lat, p.lon]);
+      if (latlngs.length > 1) {
+        const total = latlngs.length - 1;
+        for (let i = 0; i < total; i++) {
+          const color = getRainbowColor(i / total);
+          const seg = L.polyline([latlngs[i], latlngs[i + 1]], {
+            color: color, weight: 4
+          }).addTo(map);
+          droneSegments.push(seg);
+        }
+        startMarker = L.marker(latlngs[0], { title: "Start" }).addTo(map);
+        endMarker = L.marker(latlngs[latlngs.length - 1], { title: "End" }).addTo(map);
+        map.fitBounds(L.latLngBounds(latlngs));
+      }
+  
+      // Drone point markers
+      flight.path.forEach((pt, i) => {
+        const marker = L.circleMarker([pt.lat, pt.lon], {
+          radius: 4,
+          color: 'red',
+          fillColor: 'red',
+          fillOpacity: 1
+        }).addTo(map);
+  
+        marker.originalRadius = 4;
+  
+        marker.on('click', () => {
+          resetPreviousMarker();
+  
+          marker.setStyle({ radius: 10 });
+          selectedMarker = marker;
+          selectedMarkerType = 'drone';
+  
+          document.getElementById('infoBox').innerHTML = `
+            <b>🛰️ Drone Point</b><br>
+            <b>Lat:</b> ${pt.lat.toFixed(6)}<br>
+            <b>Lon:</b> ${pt.lon.toFixed(6)}<br>
+            <b>Altitude:</b> ${pt.altitude.toFixed(2)} m<br>
+            <b>Time:</b> ${pt.timestamp}
+          `;
+          document.getElementById('objectImage').style.display = "none";
+          document.getElementById('objectImage').src = "";
+        });
+  
+        dronePointMarkers.push(marker);
+      });
+  
+      // Object markers
+      flight.objects.forEach(obj => {
+        const icon = getIcon(obj.class);
+        const marker = L.marker([obj.lat, obj.lon], { icon }).addTo(map);
+  
+        marker.on('click', () => {
+          resetPreviousMarker();
+  
+          const largeIcon = getLargerIcon(obj.class);
+          marker.setIcon(largeIcon);
+          selectedMarker = marker;
+          selectedMarkerType = 'object';
+          selectedMarker.originalIcon = icon;
+  
+          document.getElementById('infoBox').innerHTML = `
+            <b>🧍 Object</b><br>
+            <b>Class:</b> ${obj.class}<br>
+            <b>Lat:</b> ${obj.lat.toFixed(6)}<br>
+            <b>Lon:</b> ${obj.lon.toFixed(6)}<br>
+            <b>Time:</b> ${obj.timestamp}
+          `;
+  
+          if (obj.image_url) {
+            document.getElementById('objectImage').src = obj.image_url;
+            document.getElementById('objectImage').style.display = "block";
+          } else {
+            document.getElementById('objectImage').style.display = "none";
+            document.getElementById('objectImage').src = "";
+          }
+        });
+  
+        objectMarkers.push(marker);
+      });
+    }
+  
+    function resetPreviousMarker() {
+      if (selectedMarker && selectedMarkerType === 'drone') {
+        selectedMarker.setStyle({ radius: selectedMarker.originalRadius });
+      } else if (selectedMarker && selectedMarkerType === 'object') {
+        selectedMarker.setIcon(selectedMarker.originalIcon);
+      }
+      selectedMarker = null;
+      selectedMarkerType = null;
+    }
+  
+    updateFlight();
+  </script>
+  
+  {% endif %}
+
+</body>
+</html>
